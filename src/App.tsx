@@ -11,8 +11,9 @@ import AdminDashboardPage from './pages/admin/AdminDashboardPage'
 import AdminSectionsPage from './pages/admin/AdminSectionsPage'
 import AdminServicesPage from './pages/admin/AdminServicesPage'
 import AdminContactsPage from './pages/admin/AdminContactsPage'
+import AdminClientsPage from './pages/admin/AdminClientsPage'
 export default function App(){return <Routes>
 <Route element={<SiteLayout/>}><Route path="/" element={<HomePage/>}/><Route path="/soluciones" element={<ServicesPage/>}/><Route path="/nosotros" element={<AboutPage/>}/><Route path="/contacto" element={<ContactPage/>}/></Route>
 <Route path="/admin/login" element={<AdminLoginPage/>}/>
-<Route element={<RequireAdmin/>}><Route path="/admin" element={<AdminLayout/>}><Route index element={<AdminDashboardPage/>}/><Route path="secciones" element={<AdminSectionsPage/>}/><Route path="servicios" element={<AdminServicesPage/>}/><Route path="contactos" element={<AdminContactsPage/>}/></Route></Route>
+<Route element={<RequireAdmin/>}><Route path="/admin" element={<AdminLayout/>}><Route index element={<AdminDashboardPage/>}/><Route path="secciones" element={<AdminSectionsPage/>}/><Route path="servicios" element={<AdminServicesPage/>}/><Route path="clientes" element={<AdminClientsPage/>}/><Route path="contactos" element={<AdminContactsPage/>}/></Route></Route>
 <Route path="*" element={<Navigate to="/" replace/>}/></Routes>}
