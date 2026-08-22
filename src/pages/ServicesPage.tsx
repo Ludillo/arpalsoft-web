@@ -1,0 +1,4 @@
+import {useEffect,useState} from 'react'
+import {supabase} from '../lib/supabase'
+export default function ServicesPage(){const[rows,setRows]=useState<any[]>([]);useEffect(()=>{supabase.from('services').select('*').eq('is_published',true).order('sort_order').then(({data})=>setRows(data||[]))},[])
+return <section className="inner-page"><div className="container"><div className="page-hero"><span className="section-kicker">SOLUCIONES</span><h1>Capacidad técnica para sistemas que sostienen el negocio.</h1><p>Desde canales digitales hasta integraciones, automatización y plataformas transaccionales.</p></div><div className="detail-list">{rows.map((s,i)=><article id={s.slug} key={s.id}><span>{String(i+1).padStart(2,'0')}</span><div><h2>{s.title}</h2><p>{s.description||s.short_description}</p><div className="tags">{s.tags?.map((t:string)=><span key={t}>{t}</span>)}</div></div></article>)}</div></div></section>}
