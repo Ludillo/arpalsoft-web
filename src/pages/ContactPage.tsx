@@ -1,8 +1,11 @@
 import { FormEvent, useState } from 'react'
 import { Mail, MapPin, Send } from 'lucide-react'
 import { supabase } from '../lib/supabase'
+import {useLang} from '../lib/locale'
+const copy={es:{kicker:'CONTACTO',title:'Conversemos sobre el siguiente paso.',description:'Cuéntanos qué necesitas construir, integrar o modernizar.',name:'Nombre',company:'Empresa',phone:'Teléfono',subject:'Asunto',message:'Mensaje',send:'Enviar mensaje',sending:'Enviando...',error:'No fue posible enviar el mensaje.',thanks:'Gracias. Recibimos tu mensaje.'},en:{kicker:'CONTACT',title:"Let's discuss your next step.",description:'Tell us what you need to build, integrate, or modernize.',name:'Name',company:'Company',phone:'Phone',subject:'Subject',message:'Message',send:'Send message',sending:'Sending...',error:'Your message could not be sent.',thanks:'Thank you. We received your message.'},pt:{kicker:'CONTATO',title:'Vamos conversar sobre o próximo passo.',description:'Conte-nos o que você precisa construir, integrar ou modernizar.',name:'Nome',company:'Empresa',phone:'Telefone',subject:'Assunto',message:'Mensagem',send:'Enviar mensagem',sending:'Enviando...',error:'Não foi possível enviar sua mensagem.',thanks:'Obrigado. Recebemos sua mensagem.'}}
 
 export default function ContactPage() {
+    const t=copy[useLang()]
     const [sending, setSending] = useState(false)
     const [msg, setMsg] = useState('')
 
@@ -30,11 +33,11 @@ export default function ContactPage() {
 
         if (error) {
             console.error('ERROR CONTACTO SUPABASE:', error)
-            setMsg('No fue posible enviar el mensaje.')
+            setMsg(t.error)
             return
         }
 
-        setMsg('Gracias. Recibimos tu mensaje.')
+        setMsg(t.thanks)
         form.reset()
     }
 
@@ -43,11 +46,11 @@ export default function ContactPage() {
             <div className="container contact-grid">
 
                 <div className="page-hero contact-copy">
-                    <span className="section-kicker">CONTACTO</span>
+                    <span className="section-kicker">{t.kicker}</span>
 
-                    <h1>Conversemos sobre el siguiente paso.</h1>
+                    <h1>{t.title}</h1>
 
-                    <p>Cuéntanos qué necesitas construir, integrar o modernizar.</p>
+                    <p>{t.description}</p>
 
                     <div className="contact-points">
                         <span><Mail /> contacto@arpalsoft.com</span>
@@ -59,12 +62,12 @@ export default function ContactPage() {
 
                     <div className="form-row">
                         <label>
-                            Nombre
+                            {t.name}
                             <input required name="full_name" />
                         </label>
 
                         <label>
-                            Empresa
+                            {t.company}
                             <input name="company" />
                         </label>
                     </div>
@@ -76,24 +79,24 @@ export default function ContactPage() {
                         </label>
 
                         <label>
-                            Teléfono
+                            {t.phone}
                             <input name="phone" />
                         </label>
                     </div>
 
                     <label>
-                        Asunto
+                        {t.subject}
                         <input name="subject" />
                     </label>
 
                     <label>
-                        Mensaje
+                        {t.message}
                         <textarea required name="message" rows={6} />
                     </label>
 
                     <button className="button button-primary" disabled={sending}>
                         <Send size={17} />
-                        {sending ? 'Enviando...' : 'Enviar mensaje'}
+                        {sending ? t.sending : t.send}
                     </button>
 
                     {msg && <p className="form-message">{msg}</p>}
