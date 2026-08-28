@@ -1,0 +1,24 @@
+import {ArrowRight,BookOpen,Code2,QrCode,Sparkles} from 'lucide-react'
+import {Link} from 'react-router-dom'
+import {useLang,useRoutes} from '../lib/locale'
+
+const content={
+ es:{kicker:'NUEVAS OPORTUNIDADES DIGITALES',title:'Creamos, conectamos y enseñamos tecnología.',intro:'Tres caminos para impulsar tu negocio o tu carrera: presencia web conectada con QR, software construido a tu medida y formación práctica en programación e inteligencia artificial.',cta:'Solicitar una propuesta',learn:'Ver programas',items:[
+  {title:'Desarrollo Web + QR',text:'Sitios rápidos, modernos y adaptables que convierten visitas en clientes. Integramos códigos QR para menús, catálogos, pagos, promociones, trazabilidad y experiencias presenciales conectadas.',tags:['Landing pages','E-commerce','QR dinámico','Pagos e integraciones']},
+  {title:'Software a Medida',text:'Transformamos procesos manuales e ideas de negocio en sistemas seguros y escalables: portales, aplicaciones, automatizaciones, APIs, paneles de control e integraciones empresariales.',tags:['Web y móvil','Automatización','APIs','Sistemas empresariales']},
+  {title:'Academia de Programación e IA',text:'Cursos prácticos desde nivel básico hasta avanzado, con rutas tradicionales y potenciadas por IA. Aprende creando proyectos reales con acompañamiento profesional.',tags:['Básico','Intermedio','Avanzado','Con y sin IA']}
+ ]},
+ en:{kicker:'NEW DIGITAL OPPORTUNITIES',title:'We build, connect, and teach technology.',intro:'Three ways to grow your business or career: QR-connected web experiences, custom-built software, and practical programming and AI education.',cta:'Request a proposal',learn:'Explore programs',items:[
+  {title:'Web Development + QR',text:'Fast, modern, responsive websites designed to convert visits into customers. QR integration for menus, catalogs, payments, promotions, traceability, and connected in-person experiences.',tags:['Landing pages','E-commerce','Dynamic QR','Payments and integrations']},
+  {title:'Custom Software',text:'We turn manual processes and business ideas into secure, scalable systems: portals, apps, automation, APIs, dashboards, and enterprise integrations.',tags:['Web and mobile','Automation','APIs','Enterprise systems']},
+  {title:'Programming & AI Academy',text:'Practical courses from beginner to advanced, with traditional and AI-powered learning paths. Learn by building real projects with professional guidance.',tags:['Beginner','Intermediate','Advanced','With and without AI']}
+ ]},
+ pt:{kicker:'NOVAS OPORTUNIDADES DIGITAIS',title:'Criamos, conectamos e ensinamos tecnologia.',intro:'Três caminhos para impulsionar seu negócio ou carreira: experiências web conectadas por QR, software sob medida e formação prática em programação e inteligência artificial.',cta:'Solicitar uma proposta',learn:'Ver programas',items:[
+  {title:'Desenvolvimento Web + QR',text:'Sites rápidos, modernos e responsivos que transformam visitas em clientes. Integramos QR para cardápios, catálogos, pagamentos, promoções, rastreabilidade e experiências presenciais conectadas.',tags:['Landing pages','E-commerce','QR dinâmico','Pagamentos e integrações']},
+  {title:'Software Sob Medida',text:'Transformamos processos manuais e ideias de negócio em sistemas seguros e escaláveis: portais, aplicativos, automações, APIs, painéis e integrações empresariais.',tags:['Web e mobile','Automação','APIs','Sistemas empresariais']},
+  {title:'Academia de Programação e IA',text:'Cursos práticos do nível básico ao avançado, com trilhas tradicionais e potencializadas por IA. Aprenda criando projetos reais com orientação profissional.',tags:['Básico','Intermediário','Avançado','Com e sem IA']}
+ ]}
+}
+
+const icons=[QrCode,Code2,BookOpen]
+export default function CommercialPage(){const lang=useLang(),r=useRoutes(),t=content[lang];return <section className="commercial-page"><div className="container"><div className="commercial-hero"><div><span className="section-kicker">{t.kicker}</span><h1>{t.title}</h1><p>{t.intro}</p><div className="hero-actions"><Link className="button button-primary" to={r.contact}>{t.cta}<ArrowRight size={18}/></Link><a className="button button-secondary" href="#oferta">{t.learn}</a></div></div><div className="commercial-orbit" aria-hidden="true"><Sparkles/><strong>WEB</strong><span>QR</span><strong>SOFTWARE</strong><span>IA</span></div></div><div id="oferta" className="commercial-grid">{t.items.map((item,index)=>{const Icon=icons[index];return <article className="commercial-card" key={item.title}><div className="commercial-number">0{index+1}</div><div className="commercial-icon"><Icon/></div><h2>{item.title}</h2><p>{item.text}</p><div className="tags">{item.tags.map(tag=><span key={tag}>{tag}</span>)}</div><Link to={r.contact}>{t.cta}<ArrowRight size={16}/></Link></article>})}</div></div></section>}
