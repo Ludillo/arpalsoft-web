@@ -1,31 +1,835 @@
-import{createClient}from'https://esm.sh/@supabase/supabase-js@2';
-const cors={'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'authorization, x-client-info, apikey, content-type','Access-Control-Allow-Methods':'GET,POST,DELETE,OPTIONS'},json=(x:any,s=200)=>new Response(JSON.stringify(x),{status:s,headers:{...cors,'Content-Type':'application/json'}}),db=createClient(Deno.env.get('SUPABASE_URL')!,Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
-async function auth(r:Request){const t=(r.headers.get('Authorization')||'').replace('Bearer ','');const{data}=await db.auth.getUser(t);if(!data.user?.email)throw Error('No autorizado');const{data:a}=await db.from('qr_admin_users').select('enabled').ilike('email',data.user.email).maybeSingle();if(!a?.enabled)throw Error('Acceso administrativo no autorizado');return data.user}
-async function integ(e:string,on=true){let q=db.from('qr_integrations').select('*').eq('environment',e);if(on)q=q.eq('enabled',true);const{data,error}=await q.single();if(error)throw Error(`Ambiente ${e} no disponible`);return data}
-const b64=(a:Uint8Array)=>btoa(String.fromCharCode(...a)),unb=(s:string)=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));async function key(){const s=Deno.env.get('CONFIG_MASTER_KEY');if(!s)throw Error('Falta configurar la llave maestra del servidor');return crypto.subtle.importKey('raw',unb(s),'AES-GCM',false,['encrypt','decrypt'])}async function seal(x:any){const iv=crypto.getRandomValues(new Uint8Array(12)),v=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},await key(),new TextEncoder().encode(JSON.stringify(x))));return b64(iv)+'.'+b64(v)}async function open(s:string){const[a,b]=s.split('.').map(unb),v=await crypto.subtle.decrypt({name:'AES-GCM',iv:a},await key(),b);return JSON.parse(new TextDecoder().decode(v))}
-async function cfg(i:any){const{data}=await db.from('qr_integration_credentials').select('encrypted_payload').eq('integration_id',i.id).maybeSingle();if(data?.encrypted_payload)return open(data.encrypted_payload);const s=Deno.env.get(i.secret_name);if(!s)throw Error(`Faltan credenciales para ${i.environment}`);return JSON.parse(s)}
-function secureEq(a:string,b:string){if(!a||!b||a.length!==b.length)return false;let d=0;for(let n=0;n<a.length;n++)d|=a.charCodeAt(n)^b.charCodeAt(n);return d===0}
-function validPayment(body:any){const p=body?.payment,required=['qrId','transactionId','paymentDate','paymentTime','currency','amount'];if(!p||typeof p!=='object')return'Falta el objeto payment';const missing=required.filter(k=>p[k]===undefined||p[k]===null||p[k]==='');if(missing.length)return`Faltan campos: ${missing.join(', ')}`;if(!['BOB','USD'].includes(p.currency))return'Moneda no válida';if(!Number.isFinite(Number(p.amount))||Number(p.amount)<=0)return'Importe no válido';return''}
-function scrub(v:any):any{if(v==null)return v;if(typeof v==='string')return v.length>3000?v.slice(0,3000)+'…':v;if(Array.isArray(v))return v.slice(0,50).map(scrub);if(typeof v==='object'){const out:any={};for(const[k,x]of Object.entries(v)){if(/password|token|aes|accountcredit|qrimage|authorization|callbacksecret/i.test(k))out[k]='[PROTEGIDO]';else out[k]=scrub(x)}return out}return v}
-async function bank(i:any,p:string,o:RequestInit={}){const started=Date.now(),method=o.method||'GET',endpoint=p.split('?')[0];let request:any=null;if(o.body)try{request=scrub(JSON.parse(String(o.body)))}catch{request='[CONTENIDO NO JSON]'}if(endpoint.includes('/encrypt'))request={operation:'Cifrado de dato sensible'};let response:Response;try{response=await fetch(i.base_url.replace(/\/$/,'')+p,o)}catch(e){await db.from('qr_api_logs').insert({integration_id:i.id,method,endpoint,request_payload:request,success:false,error:String(e),duration_ms:Date.now()-started});throw e}const t=await response.text();let x;try{x=JSON.parse(t)}catch{x=t}await db.from('qr_api_logs').insert({integration_id:i.id,method,endpoint,request_payload:request,status_code:response.status,response_payload:scrub(x),success:response.ok,duration_ms:Date.now()-started});if(!response.ok)throw Error(`Banco HTTP ${response.status}`);return x}async function enc(i:any,c:any,t:string){return bank(i,`/api/authentication/encrypt?${new URLSearchParams({text:t,aesKey:c.aesKey})}`)}async function token(i:any,c:any){const x=await bank(i,'/api/authentication/authenticate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userName:c.userName,password:await enc(i,c,c.password)})});if(x.responseCode!==0)throw Error(x.message||'No se pudo autenticar con el banco');return x.token}
-async function pay(i:any,p:any,source:string){const k=[i.id,p.qrId,p.paymentDate,p.paymentTime,p.amount,p.senderAccount].join('|'),{data:q}=await db.from('qr_codes').select('id').eq('integration_id',i.id).eq('bank_qr_id',p.qrId).maybeSingle(),row={qr_code_id:q?.id||null,integration_id:i.id,bank_qr_id:p.qrId,transaction_id:p.transactionId,payment_date:String(p.paymentDate).slice(0,10),payment_time:p.paymentTime||null,currency:p.currency,amount:p.amount,sender_bank_code:p.senderBankCode,sender_name:p.senderName,sender_document_id:p.senderDocumentId,sender_account_masked:p.senderAccount,description:p.description,branch_code:p.branchCode,source,raw_payload:p,dedupe_key:k};const{error}=await db.from('qr_payments').upsert(row,{onConflict:'dedupe_key',ignoreDuplicates:true});if(error)throw error;if(q?.id){const now=new Date().toISOString();await db.from('qr_codes').update({status:'paid',updated_at:now}).eq('id',q.id);await db.from('qr_external_requests').update({status:'paid',paid_at:now,updated_at:now}).eq('qr_code_id',q.id)}}
-async function sessionHash(value:string){const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value));return Array.from(new Uint8Array(bytes),x=>x.toString(16).padStart(2,'0')).join('')}
-function externalContext(r:Request){const expected=Deno.env.get('CLOUDFLARE_PROXY_SECRET')||'',proxy=r.headers.get('x-proxy-secret')||'',client=(r.headers.get('x-client-code')||'').trim(),environment=(r.headers.get('x-qr-environment')||'production').trim();if(!secureEq(proxy,expected))throw Error('No autorizado');if(!/^[a-z0-9-]{3,40}$/.test(client))throw Error('Cliente externo inválido');if(!['test','production'].includes(environment))throw Error('Ambiente inválido');return{client,environment}}
-async function randomTransactionId(i:any){for(let attempt=0;attempt<20;attempt++){const values=new Uint32Array(1);crypto.getRandomValues(values);const candidate=String(10_000_000+(values[0]%90_000_000));const{data}=await db.from('qr_codes').select('id').eq('integration_id',i.id).eq('transaction_id',candidate).maybeSingle();if(!data)return candidate}throw Error('No se pudo reservar un identificador de transacción')}
-const dateOnly=(value:Date)=>value.toISOString().slice(0,10);
-async function reconcileBankDate(i:any,c:any,date:string){const x=await bank(i,`/api/qrsimple/v2/paidQR/${date.replaceAll('-','')}`,{headers:{Authorization:`Bearer ${await token(i,c)}`}});for(const payment of x.paymentList||[])await pay(i,payment,'reconciliation');return(x.paymentList||[]).length}
-Deno.serve(async r=>{if(r.method==='OPTIONS')return new Response('ok',{headers:cors});try{const u=new URL(r.url),route=u.pathname.split('/').pop()||'';
-if(route==='callback-test'){const i=await integ(u.searchParams.get('environment')||'test'),proxySecret=Deno.env.get('CLOUDFLARE_PROXY_SECRET')||'';if(!secureEq(r.headers.get('x-proxy-secret')||'',proxySecret))return json({responseCode:401,message:'No autorizado'},401);const body=await r.json(),validation=validPayment(body),{error}=await db.from('qr_callback_tests').insert({integration_id:i.id,payload:body,valid:!validation,error:validation||null});if(error)throw error;return json({responseCode:validation?400:0,message:validation,test:true,receivedAt:new Date().toISOString()},validation?400:200)}
-if(route==='callback'){const i=await integ(u.searchParams.get('environment')||'test'),proxySecret=Deno.env.get('CLOUDFLARE_PROXY_SECRET')||'',fromProxy=secureEq(r.headers.get('x-proxy-secret')||'',proxySecret);let legacy=false;if(!fromProxy){const c=await cfg(i);legacy=secureEq(u.searchParams.get('token')||'',c.callbackSecret||'')}if(!fromProxy&&!legacy)return json({responseCode:401,message:'No autorizado'},401);const body=await r.json(),validation=validPayment(body);if(validation){await db.from('qr_callback_events').insert({integration_id:i.id,payload:body,error:validation});return json({responseCode:400,message:validation},400)}const{data:e,error}=await db.from('qr_callback_events').insert({integration_id:i.id,payload:body}).select().single();if(error)throw error;try{await pay(i,body.payment,'callback');await db.from('qr_callback_events').update({processed:true,processed_at:new Date().toISOString()}).eq('id',e.id);return json({responseCode:0,message:''})}catch(x){await db.from('qr_callback_events').update({error:String(x)}).eq('id',e.id);throw x}}
-if(route==='external-generate'&&r.method==='POST'){const context=externalContext(r),b=await r.json(),sessionId=String(b.sessionId||'').trim();if(sessionId.length<16||sessionId.length>200)throw Error('sessionId inválido');const amount=Number(b.amount);if(!Number.isFinite(amount)||amount<=0)throw Error('Importe inválido');const currency=String(b.currency||'BOB').toUpperCase();if(!['BOB','USD'].includes(currency))throw Error('Moneda inválida');const description=String(b.description||'Cobro Mentes Modernas').slice(0,100),dueDate=String(b.dueDate||dateOnly(new Date(Date.now()+86_400_000)));if(!/^\d{4}-\d{2}-\d{2}$/.test(dueDate))throw Error('dueDate inválida');const i=await integ(context.environment),c=await cfg(i),transactionId=await randomTransactionId(i),hash=await sessionHash(sessionId),payload={transactionId,accountCredit:await enc(i,c,c.accountCredit),currency,amount,description,dueDate,singleUse:b.singleUse!==false,modifyAmount:!!b.modifyAmount};const{data:q,error:qError}=await db.from('qr_codes').insert({integration_id:i.id,transaction_id:transactionId,currency,amount,description,due_date:dueDate,single_use:payload.singleUse,modify_amount:payload.modifyAmount,status:'pending'}).select('id').single();if(qError)throw qError;const{data:external,error:externalError}=await db.from('qr_external_requests').insert({client_code:context.client,session_hash:hash,integration_id:i.id,qr_code_id:q.id,transaction_id:transactionId,environment:context.environment,currency,amount,description,status:'pending'}).select('id').single();if(externalError)throw externalError;try{const x=await bank(i,'/api/qrsimple/generateQR',{method:'POST',headers:{Authorization:`Bearer ${await token(i,c)}`,'Content-Type':'application/json'},body:JSON.stringify(payload)});const status=x.responseCode===0?'pending':'error';await db.from('qr_codes').update({bank_qr_id:x.qrId,qr_image_base64:x.qrImage,bank_response:x,status,updated_at:new Date().toISOString()}).eq('id',q.id);await db.from('qr_external_requests').update({status,updated_at:new Date().toISOString()}).eq('id',external.id);if(x.responseCode!==0)throw Error(x.message||'El banco rechazó la generación');return json({transactionId,qrId:x.qrId,qrImage:x.qrImage,status:'pending',dueDate})}catch(error){await db.from('qr_codes').update({status:'error',updated_at:new Date().toISOString()}).eq('id',q.id);await db.from('qr_external_requests').update({status:'error',updated_at:new Date().toISOString()}).eq('id',external.id);throw error}}
-if(route==='external-status'&&r.method==='GET'){const context=externalContext(r),transactionId=String(u.searchParams.get('transactionId')||''),sessionId=String(u.searchParams.get('sessionId')||'');if(!/^\d{4,8}$/.test(transactionId)||sessionId.length<16||sessionId.length>200)throw Error('Consulta inválida');const hash=await sessionHash(sessionId),i=await integ(context.environment),{data:external,error}=await db.from('qr_external_requests').select('*').eq('client_code',context.client).eq('session_hash',hash).eq('integration_id',i.id).eq('transaction_id',transactionId).maybeSingle();if(error)throw error;if(!external)return json({error:'QR no encontrado'},404);let bankChecked=false,found=0;const last=external.last_bank_check_at?new Date(external.last_bank_check_at).getTime():0;if(external.status==='pending'&&Date.now()-last>=45_000){await db.from('qr_external_requests').update({last_bank_check_at:new Date().toISOString()}).eq('id',external.id);const c=await cfg(i),dates=[dateOnly(new Date()),dateOnly(new Date(external.created_at))].filter((x,index,array)=>array.indexOf(x)===index);for(const date of dates)found+=await reconcileBankDate(i,c,date);bankChecked=true}const{data:q}=await db.from('qr_codes').select('bank_qr_id,status,updated_at').eq('id',external.qr_code_id).single();const status=q?.status||external.status;if(status!==external.status)await db.from('qr_external_requests').update({status,paid_at:status==='paid'?new Date().toISOString():external.paid_at}).eq('id',external.id);return json({transactionId,qrId:q?.bank_qr_id||null,status,paid:status==='paid',bankChecked,reportPaymentsFound:found,updatedAt:q?.updated_at||external.updated_at})}
-const user=await auth(r);
-if(route==='generate'&&r.method==='POST'){const b=await r.json(),i=await integ(b.environment||'test'),c=await cfg(i);if(!/^[A-Za-z0-9._-]{1,30}$/.test(b.transactionId))throw Error('transactionId inválido');const jwt=await token(i,c),p={transactionId:b.transactionId,accountCredit:await enc(i,c,c.accountCredit),currency:b.currency,amount:Number(b.amount),description:b.description||'',dueDate:b.dueDate,singleUse:!!b.singleUse,modifyAmount:!!b.modifyAmount,branchCode:b.branchCode||undefined};await db.from('qr_codes').insert({integration_id:i.id,transaction_id:b.transactionId,currency:b.currency,amount:b.amount,description:b.description,due_date:b.dueDate,single_use:b.singleUse,modify_amount:b.modifyAmount,branch_code:b.branchCode,status:'pending'});const x=await bank(i,'/api/qrsimple/generateQR',{method:'POST',headers:{Authorization:`Bearer ${jwt}`,'Content-Type':'application/json'},body:JSON.stringify(p)});await db.from('qr_codes').update({bank_qr_id:x.qrId,qr_image_base64:x.qrImage,bank_response:x,status:x.responseCode===0?'pending':'error',updated_at:new Date().toISOString()}).eq('integration_id',i.id).eq('transaction_id',b.transactionId);await db.from('qr_audit_log').insert({actor_id:user.id,action:'generate',entity_type:'qr',entity_id:x.qrId,metadata:{environment:b.environment}});if(x.responseCode!==0)throw Error(x.message);return json(x)}
-if(route==='cancel'&&r.method==='DELETE'){const b=await r.json(),i=await integ(b.environment||'test'),c=await cfg(i),{data:q}=await db.from('qr_codes').select('id,status').eq('integration_id',i.id).eq('bank_qr_id',b.qrId).single();if(!q)throw Error('QR no encontrado');if(q.status!=='pending')throw Error(`El QR no puede anularse porque está ${q.status}`);const x=await bank(i,'/api/qrsimple/cancelQR',{method:'DELETE',headers:{Authorization:`Bearer ${await token(i,c)}`,'Content-Type':'application/json'},body:JSON.stringify({qrId:b.qrId})});if(x.responseCode!==0)throw Error(x.message||'El banco rechazó la anulación');await db.from('qr_codes').update({status:'cancelled',bank_response:x,updated_at:new Date().toISOString()}).eq('id',q.id);await db.from('qr_audit_log').insert({actor_id:user.id,action:'cancel',entity_type:'qr',entity_id:b.qrId,metadata:{environment:b.environment}});return json({ok:true})}
-if(route==='reconcile'&&r.method==='POST'){const b=await r.json(),i=await integ(b.environment||'test'),c=await cfg(i),{data:run}=await db.from('qr_reconciliation_runs').insert({integration_id:i.id,reconciliation_date:b.date}).select().single();try{const x=await bank(i,`/api/qrsimple/v2/paidQR/${String(b.date).replaceAll('-','')}`,{headers:{Authorization:`Bearer ${await token(i,c)}`}});let n=0;for(const p of x.paymentList||[]){await pay(i,p,'reconciliation');n++}await db.from('qr_reconciliation_runs').update({status:'completed',payments_found:n,payments_inserted:n,completed_at:new Date().toISOString()}).eq('id',run.id);return json({ok:true,count:n})}catch(e){await db.from('qr_reconciliation_runs').update({status:'failed',error:String(e),completed_at:new Date().toISOString()}).eq('id',run.id);throw e}}
-if(route==='report'){const i=await integ(u.searchParams.get('environment')||'test');let q=db.from('qr_payments').select('*').eq('integration_id',i.id).order('payment_date',{ascending:false});if(u.searchParams.get('from'))q=q.gte('payment_date',u.searchParams.get('from'));if(u.searchParams.get('to'))q=q.lte('payment_date',u.searchParams.get('to'));const{data,error}=await q.limit(5000);if(error)throw error;return json({payments:data})}
-if(route==='dashboard'){const i=await integ(u.searchParams.get('environment')||'test'),[{count:qrCount},{count:paymentCount},{count:pending},{data:payments},{data:recent}]=await Promise.all([db.from('qr_codes').select('*',{count:'exact',head:true}).eq('integration_id',i.id),db.from('qr_payments').select('*',{count:'exact',head:true}).eq('integration_id',i.id),db.from('qr_codes').select('*',{count:'exact',head:true}).eq('integration_id',i.id).eq('status','pending'),db.from('qr_payments').select('amount').eq('integration_id',i.id),db.from('qr_codes').select('transaction_id,bank_qr_id,currency,amount,status').eq('integration_id',i.id).order('created_at',{ascending:false}).limit(8)]);return json({metrics:{qrCount,paymentCount,pending,total:(payments||[]).reduce((s:any,p:any)=>s+Number(p.amount),0),currency:'BOB'},recent})}
-if(route==='api-logs'){const i=await integ(u.searchParams.get('environment')||'test',false),limit=Math.min(Number(u.searchParams.get('limit')||100),500),{data,error}=await db.from('qr_api_logs').select('id,method,endpoint,request_payload,status_code,response_payload,success,error,duration_ms,created_at').eq('integration_id',i.id).order('created_at',{ascending:false}).limit(limit);if(error)throw error;return json({logs:data})}
-if(route==='settings'&&r.method==='GET'){const{data,error}=await db.from('qr_integrations').select('id,environment,enabled,base_url').order('environment');if(error)throw error;const{data:c}=await db.from('qr_integration_credentials').select('integration_id');return json({environments:(data||[]).map(x=>({...x,hasCredentials:(c||[]).some(y=>y.integration_id===x.id)||!!Deno.env.get(x.environment==='test'?'BANECO_TEST_CONFIG':'BANECO_PRODUCTION_CONFIG')}))})}
-if(route==='settings'&&r.method==='POST'){const b=await r.json(),i=await integ(b.environment,false);let c:any={};try{c=await cfg(i)}catch{}for(const f of['userName','password','aesKey','accountCredit'])if(String(b[f]||'').trim())c[f]=String(b[f]).trim();if(!c.callbackSecret)c.callbackSecret=crypto.randomUUID().replaceAll('-','');for(const f of['userName','password','aesKey','accountCredit'])if(!c[f])throw Error(`Falta completar ${f}`);const url=String(b.baseUrl||'').trim();if(!/^https:\/\//i.test(url))throw Error('La URL debe comenzar con https://');const{error:e}=await db.from('qr_integration_credentials').upsert({integration_id:i.id,encrypted_payload:await seal(c),updated_at:new Date().toISOString()});if(e)throw e;const{error:e2}=await db.from('qr_integrations').update({base_url:url.replace(/\/$/,''),enabled:!!b.enabled,updated_at:new Date().toISOString()}).eq('id',i.id);if(e2)throw e2;await db.from('qr_audit_log').insert({actor_id:user.id,action:'settings_update',entity_type:'integration',entity_id:i.id,metadata:{environment:b.environment,enabled:!!b.enabled}});return json({ok:true})}
-return json({error:'Ruta no encontrada'},404)}catch(e){const m=e instanceof Error?e.message:String(e);return json({error:m},m==='No autorizado'?401:400)}});
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+const cors = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers":
+      "authorization, x-client-info, apikey, content-type",
+    "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
+  },
+  json = (x: any, s = 200) =>
+    new Response(JSON.stringify(x), {
+      status: s,
+      headers: { ...cors, "Content-Type": "application/json" },
+    }),
+  db = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  );
+async function auth(r: Request) {
+  const t = (r.headers.get("Authorization") || "").replace("Bearer ", "");
+  const { data } = await db.auth.getUser(t);
+  if (!data.user?.email) throw Error("No autorizado");
+  const { data: a } = await db
+    .from("qr_admin_users")
+    .select("enabled")
+    .ilike("email", data.user.email)
+    .maybeSingle();
+  if (!a?.enabled) throw Error("Acceso administrativo no autorizado");
+  return data.user;
+}
+async function integ(e: string, on = true) {
+  let q = db.from("qr_integrations").select("*").eq("environment", e);
+  if (on) q = q.eq("enabled", true);
+  const { data, error } = await q.single();
+  if (error) throw Error(`Ambiente ${e} no disponible`);
+  return data;
+}
+const b64 = (a: Uint8Array) => btoa(String.fromCharCode(...a)),
+  unb = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+async function key() {
+  const s = Deno.env.get("CONFIG_MASTER_KEY");
+  if (!s) throw Error("Falta configurar la llave maestra del servidor");
+  return crypto.subtle.importKey("raw", unb(s), "AES-GCM", false, [
+    "encrypt",
+    "decrypt",
+  ]);
+}
+async function seal(x: any) {
+  const iv = crypto.getRandomValues(new Uint8Array(12)),
+    v = new Uint8Array(
+      await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv },
+        await key(),
+        new TextEncoder().encode(JSON.stringify(x)),
+      ),
+    );
+  return b64(iv) + "." + b64(v);
+}
+async function open(s: string) {
+  const [a, b] = s.split(".").map(unb),
+    v = await crypto.subtle.decrypt({ name: "AES-GCM", iv: a }, await key(), b);
+  return JSON.parse(new TextDecoder().decode(v));
+}
+async function cfg(i: any) {
+  const { data } = await db
+    .from("qr_integration_credentials")
+    .select("encrypted_payload")
+    .eq("integration_id", i.id)
+    .maybeSingle();
+  if (data?.encrypted_payload) return open(data.encrypted_payload);
+  const s = Deno.env.get(i.secret_name);
+  if (!s) throw Error(`Faltan credenciales para ${i.environment}`);
+  return JSON.parse(s);
+}
+function secureEq(a: string, b: string) {
+  if (!a || !b || a.length !== b.length) return false;
+  let d = 0;
+  for (let n = 0; n < a.length; n++) d |= a.charCodeAt(n) ^ b.charCodeAt(n);
+  return d === 0;
+}
+function validPayment(body: any) {
+  const p = body?.payment,
+    required = [
+      "qrId",
+      "transactionId",
+      "paymentDate",
+      "paymentTime",
+      "currency",
+      "amount",
+    ];
+  if (!p || typeof p !== "object") return "Falta el objeto payment";
+  const missing = required.filter(
+    (k) => p[k] === undefined || p[k] === null || p[k] === "",
+  );
+  if (missing.length) return `Faltan campos: ${missing.join(", ")}`;
+  if (!["BOB", "USD"].includes(p.currency)) return "Moneda no válida";
+  if (!Number.isFinite(Number(p.amount)) || Number(p.amount) <= 0)
+    return "Importe no válido";
+  return "";
+}
+function scrub(v: any): any {
+  if (v == null) return v;
+  if (typeof v === "string")
+    return v.length > 3000 ? v.slice(0, 3000) + "…" : v;
+  if (Array.isArray(v)) return v.slice(0, 50).map(scrub);
+  if (typeof v === "object") {
+    const out: any = {};
+    for (const [k, x] of Object.entries(v)) {
+      if (
+        /password|token|aes|accountcredit|qrimage|authorization|callbacksecret/i.test(
+          k,
+        )
+      )
+        out[k] = "[PROTEGIDO]";
+      else out[k] = scrub(x);
+    }
+    return out;
+  }
+  return v;
+}
+async function bank(i: any, p: string, o: RequestInit = {}) {
+  const started = Date.now(),
+    method = o.method || "GET",
+    endpoint = p.split("?")[0];
+  let request: any = null;
+  if (o.body)
+    try {
+      request = scrub(JSON.parse(String(o.body)));
+    } catch {
+      request = "[CONTENIDO NO JSON]";
+    }
+  if (endpoint.includes("/encrypt"))
+    request = { operation: "Cifrado de dato sensible" };
+  let response: Response;
+  try {
+    response = await fetch(i.base_url.replace(/\/$/, "") + p, o);
+  } catch (e) {
+    await db
+      .from("qr_api_logs")
+      .insert({
+        integration_id: i.id,
+        method,
+        endpoint,
+        request_payload: request,
+        success: false,
+        error: String(e),
+        duration_ms: Date.now() - started,
+      });
+    throw e;
+  }
+  const t = await response.text();
+  let x;
+  try {
+    x = JSON.parse(t);
+  } catch {
+    x = t;
+  }
+  await db
+    .from("qr_api_logs")
+    .insert({
+      integration_id: i.id,
+      method,
+      endpoint,
+      request_payload: request,
+      status_code: response.status,
+      response_payload: scrub(x),
+      success: response.ok,
+      duration_ms: Date.now() - started,
+    });
+  if (!response.ok) throw Error(`Banco HTTP ${response.status}`);
+  return x;
+}
+async function enc(i: any, c: any, t: string) {
+  return bank(
+    i,
+    `/api/authentication/encrypt?${new URLSearchParams({ text: t, aesKey: c.aesKey })}`,
+  );
+}
+async function token(i: any, c: any) {
+  const x = await bank(i, "/api/authentication/authenticate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      userName: c.userName,
+      password: await enc(i, c, c.password),
+    }),
+  });
+  if (x.responseCode !== 0)
+    throw Error(x.message || "No se pudo autenticar con el banco");
+  return x.token;
+}
+async function pay(i: any, p: any, source: string) {
+  const k = [
+      i.id,
+      p.qrId,
+      p.paymentDate,
+      p.paymentTime,
+      p.amount,
+      p.senderAccount,
+    ].join("|"),
+    { data: q } = await db
+      .from("qr_codes")
+      .select("id")
+      .eq("integration_id", i.id)
+      .eq("bank_qr_id", p.qrId)
+      .maybeSingle(),
+    row = {
+      qr_code_id: q?.id || null,
+      integration_id: i.id,
+      bank_qr_id: p.qrId,
+      transaction_id: p.transactionId,
+      payment_date: String(p.paymentDate).slice(0, 10),
+      payment_time: p.paymentTime || null,
+      currency: p.currency,
+      amount: p.amount,
+      sender_bank_code: p.senderBankCode,
+      sender_name: p.senderName,
+      sender_document_id: p.senderDocumentId,
+      sender_account_masked: p.senderAccount,
+      description: p.description,
+      branch_code: p.branchCode,
+      source,
+      raw_payload: p,
+      dedupe_key: k,
+    };
+  const { error } = await db
+    .from("qr_payments")
+    .upsert(row, { onConflict: "dedupe_key", ignoreDuplicates: true });
+  if (error) throw error;
+  if (q?.id) {
+    const now = new Date().toISOString();
+    await db
+      .from("qr_codes")
+      .update({ status: "paid", updated_at: now })
+      .eq("id", q.id);
+    await db
+      .from("qr_external_requests")
+      .update({ status: "paid", paid_at: now, updated_at: now })
+      .eq("qr_code_id", q.id);
+  }
+}
+async function sessionHash(value: string) {
+  const bytes = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return Array.from(new Uint8Array(bytes), (x) =>
+    x.toString(16).padStart(2, "0"),
+  ).join("");
+}
+function externalContext(r: Request) {
+  const expected = Deno.env.get("CLOUDFLARE_PROXY_SECRET") || "",
+    proxy = r.headers.get("x-proxy-secret") || "",
+    client = (r.headers.get("x-client-code") || "").trim(),
+    environment = (r.headers.get("x-qr-environment") || "production").trim();
+  if (!secureEq(proxy, expected)) throw Error("No autorizado");
+  if (!/^[a-z0-9-]{3,40}$/.test(client))
+    throw Error("Cliente externo inválido");
+  if (!["test", "production"].includes(environment))
+    throw Error("Ambiente inválido");
+  return { client, environment };
+}
+async function randomTransactionId(i: any) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const values = new Uint32Array(1);
+    crypto.getRandomValues(values);
+    const candidate = String(10_000_000 + (values[0] % 90_000_000));
+    const { data } = await db
+      .from("qr_codes")
+      .select("id")
+      .eq("integration_id", i.id)
+      .eq("transaction_id", candidate)
+      .maybeSingle();
+    if (!data) return candidate;
+  }
+  throw Error("No se pudo reservar un identificador de transacción");
+}
+const dateOnly = (value: Date) => value.toISOString().slice(0, 10);
+async function reconcileBankDate(i: any, c: any, date: string) {
+  const x = await bank(
+    i,
+    `/api/qrsimple/v2/paidQR/${date.replaceAll("-", "")}`,
+    { headers: { Authorization: `Bearer ${await token(i, c)}` } },
+  );
+  for (const payment of x.paymentList || [])
+    await pay(i, payment, "reconciliation");
+  return (x.paymentList || []).length;
+}
+Deno.serve(async (r) => {
+  if (r.method === "OPTIONS") return new Response("ok", { headers: cors });
+  try {
+    const u = new URL(r.url),
+      route = u.pathname.split("/").pop() || "";
+    if (route === "callback-test") {
+      const i = await integ(u.searchParams.get("environment") || "test"),
+        proxySecret = Deno.env.get("CLOUDFLARE_PROXY_SECRET") || "";
+      if (!secureEq(r.headers.get("x-proxy-secret") || "", proxySecret))
+        return json({ responseCode: 401, message: "No autorizado" }, 401);
+      const body = await r.json(),
+        validation = validPayment(body),
+        { error } = await db
+          .from("qr_callback_tests")
+          .insert({
+            integration_id: i.id,
+            payload: body,
+            valid: !validation,
+            error: validation || null,
+          });
+      if (error) throw error;
+      return json(
+        {
+          responseCode: validation ? 400 : 0,
+          message: validation,
+          test: true,
+          receivedAt: new Date().toISOString(),
+        },
+        validation ? 400 : 200,
+      );
+    }
+    if (route === "callback") {
+      const i = await integ(u.searchParams.get("environment") || "test"),
+        proxySecret = Deno.env.get("CLOUDFLARE_PROXY_SECRET") || "",
+        fromProxy = secureEq(
+          r.headers.get("x-proxy-secret") || "",
+          proxySecret,
+        );
+      let legacy = false;
+      if (!fromProxy) {
+        const c = await cfg(i);
+        legacy = secureEq(
+          u.searchParams.get("token") || "",
+          c.callbackSecret || "",
+        );
+      }
+      if (!fromProxy && !legacy)
+        return json({ responseCode: 401, message: "No autorizado" }, 401);
+      const body = await r.json(),
+        validation = validPayment(body);
+      if (validation) {
+        await db
+          .from("qr_callback_events")
+          .insert({ integration_id: i.id, payload: body, error: validation });
+        return json({ responseCode: 400, message: validation }, 400);
+      }
+      const { data: e, error } = await db
+        .from("qr_callback_events")
+        .insert({ integration_id: i.id, payload: body })
+        .select()
+        .single();
+      if (error) throw error;
+      try {
+        await pay(i, body.payment, "callback");
+        await db
+          .from("qr_callback_events")
+          .update({ processed: true, processed_at: new Date().toISOString() })
+          .eq("id", e.id);
+        return json({ responseCode: 0, message: "" });
+      } catch (x) {
+        await db
+          .from("qr_callback_events")
+          .update({ error: String(x) })
+          .eq("id", e.id);
+        throw x;
+      }
+    }
+    if (route === "external-generate" && r.method === "POST") {
+      const context = externalContext(r),
+        b = await r.json(),
+        sessionId = String(b.sessionId || "").trim();
+      if (sessionId.length < 16 || sessionId.length > 200)
+        throw Error("sessionId inválido");
+      const amount = Number(b.amount);
+      if (!Number.isFinite(amount) || amount <= 0)
+        throw Error("Importe inválido");
+      const currency = String(b.currency || "BOB").toUpperCase();
+      if (!["BOB", "USD"].includes(currency)) throw Error("Moneda inválida");
+      const description = String(
+          b.description || "Cobro Mentes Modernas",
+        ).slice(0, 100),
+        dueDate = String(
+          b.dueDate || dateOnly(new Date(Date.now() + 86_400_000)),
+        ),
+        branchCode = String(b.branchCode || "01");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) throw Error("dueDate inválida");
+      if (!/^\d{2}$/.test(branchCode)) throw Error("branchCode inválido");
+      const i = await integ(context.environment),
+        c = await cfg(i),
+        transactionId = await randomTransactionId(i),
+        hash = await sessionHash(sessionId),
+        payload = {
+          transactionId,
+          accountCredit: await enc(i, c, c.accountCredit),
+          currency,
+          amount,
+          description,
+          dueDate,
+          singleUse: b.singleUse !== false,
+          modifyAmount: !!b.modifyAmount,
+          branchCode,
+        };
+      const { data: q, error: qError } = await db
+        .from("qr_codes")
+        .insert({
+          integration_id: i.id,
+          transaction_id: transactionId,
+          currency,
+          amount,
+          description,
+          due_date: dueDate,
+          single_use: payload.singleUse,
+          modify_amount: payload.modifyAmount,
+          branch_code: branchCode,
+          status: "pending",
+        })
+        .select("id")
+        .single();
+      if (qError) throw qError;
+      const { data: external, error: externalError } = await db
+        .from("qr_external_requests")
+        .insert({
+          client_code: context.client,
+          session_hash: hash,
+          integration_id: i.id,
+          qr_code_id: q.id,
+          transaction_id: transactionId,
+          environment: context.environment,
+          currency,
+          amount,
+          description,
+          status: "pending",
+        })
+        .select("id")
+        .single();
+      if (externalError) throw externalError;
+      try {
+        const x = await bank(i, "/api/qrsimple/generateQR", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${await token(i, c)}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        });
+        const status = x.responseCode === 0 ? "pending" : "error";
+        await db
+          .from("qr_codes")
+          .update({
+            bank_qr_id: x.qrId,
+            qr_image_base64: x.qrImage,
+            bank_response: x,
+            status,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", q.id);
+        await db
+          .from("qr_external_requests")
+          .update({ status, updated_at: new Date().toISOString() })
+          .eq("id", external.id);
+        if (x.responseCode !== 0)
+          throw Error(x.message || "El banco rechazó la generación");
+        return json({
+          transactionId,
+          qrId: x.qrId,
+          qrImage: x.qrImage,
+          status: "pending",
+          dueDate,
+        });
+      } catch (error) {
+        await db
+          .from("qr_codes")
+          .update({ status: "error", updated_at: new Date().toISOString() })
+          .eq("id", q.id);
+        await db
+          .from("qr_external_requests")
+          .update({ status: "error", updated_at: new Date().toISOString() })
+          .eq("id", external.id);
+        throw error;
+      }
+    }
+    if (route === "external-status" && r.method === "GET") {
+      const context = externalContext(r),
+        transactionId = String(u.searchParams.get("transactionId") || ""),
+        sessionId = String(u.searchParams.get("sessionId") || "");
+      if (
+        !/^\d{4,8}$/.test(transactionId) ||
+        sessionId.length < 16 ||
+        sessionId.length > 200
+      )
+        throw Error("Consulta inválida");
+      const hash = await sessionHash(sessionId),
+        i = await integ(context.environment),
+        { data: external, error } = await db
+          .from("qr_external_requests")
+          .select("*")
+          .eq("client_code", context.client)
+          .eq("session_hash", hash)
+          .eq("integration_id", i.id)
+          .eq("transaction_id", transactionId)
+          .maybeSingle();
+      if (error) throw error;
+      if (!external) return json({ error: "QR no encontrado" }, 404);
+      let bankChecked = false,
+        found = 0;
+      const last = external.last_bank_check_at
+        ? new Date(external.last_bank_check_at).getTime()
+        : 0;
+      if (external.status === "pending" && Date.now() - last >= 45_000) {
+        await db
+          .from("qr_external_requests")
+          .update({ last_bank_check_at: new Date().toISOString() })
+          .eq("id", external.id);
+        const c = await cfg(i),
+          dates = [
+            dateOnly(new Date()),
+            dateOnly(new Date(external.created_at)),
+          ].filter((x, index, array) => array.indexOf(x) === index);
+        for (const date of dates) found += await reconcileBankDate(i, c, date);
+        bankChecked = true;
+      }
+      const { data: q } = await db
+        .from("qr_codes")
+        .select("bank_qr_id,status,updated_at")
+        .eq("id", external.qr_code_id)
+        .single();
+      const status = q?.status || external.status;
+      if (status !== external.status)
+        await db
+          .from("qr_external_requests")
+          .update({
+            status,
+            paid_at:
+              status === "paid" ? new Date().toISOString() : external.paid_at,
+          })
+          .eq("id", external.id);
+      return json({
+        transactionId,
+        qrId: q?.bank_qr_id || null,
+        status,
+        paid: status === "paid",
+        bankChecked,
+        reportPaymentsFound: found,
+        updatedAt: q?.updated_at || external.updated_at,
+      });
+    }
+    const user = await auth(r);
+    if (route === "generate" && r.method === "POST") {
+      const b = await r.json(),
+        i = await integ(b.environment || "test"),
+        c = await cfg(i);
+      if (!/^[A-Za-z0-9._-]{1,30}$/.test(b.transactionId))
+        throw Error("transactionId inválido");
+      const jwt = await token(i, c),
+        p = {
+          transactionId: b.transactionId,
+          accountCredit: await enc(i, c, c.accountCredit),
+          currency: b.currency,
+          amount: Number(b.amount),
+          description: b.description || "",
+          dueDate: b.dueDate,
+          singleUse: !!b.singleUse,
+          modifyAmount: !!b.modifyAmount,
+          branchCode: b.branchCode || undefined,
+        };
+      await db
+        .from("qr_codes")
+        .insert({
+          integration_id: i.id,
+          transaction_id: b.transactionId,
+          currency: b.currency,
+          amount: b.amount,
+          description: b.description,
+          due_date: b.dueDate,
+          single_use: b.singleUse,
+          modify_amount: b.modifyAmount,
+          branch_code: b.branchCode,
+          status: "pending",
+        });
+      const x = await bank(i, "/api/qrsimple/generateQR", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${jwt}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(p),
+      });
+      await db
+        .from("qr_codes")
+        .update({
+          bank_qr_id: x.qrId,
+          qr_image_base64: x.qrImage,
+          bank_response: x,
+          status: x.responseCode === 0 ? "pending" : "error",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("integration_id", i.id)
+        .eq("transaction_id", b.transactionId);
+      await db
+        .from("qr_audit_log")
+        .insert({
+          actor_id: user.id,
+          action: "generate",
+          entity_type: "qr",
+          entity_id: x.qrId,
+          metadata: { environment: b.environment },
+        });
+      if (x.responseCode !== 0) throw Error(x.message);
+      return json(x);
+    }
+    if (route === "cancel" && r.method === "DELETE") {
+      const b = await r.json(),
+        i = await integ(b.environment || "test"),
+        c = await cfg(i),
+        { data: q } = await db
+          .from("qr_codes")
+          .select("id,status")
+          .eq("integration_id", i.id)
+          .eq("bank_qr_id", b.qrId)
+          .single();
+      if (!q) throw Error("QR no encontrado");
+      if (q.status !== "pending")
+        throw Error(`El QR no puede anularse porque está ${q.status}`);
+      const x = await bank(i, "/api/qrsimple/cancelQR", {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${await token(i, c)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ qrId: b.qrId }),
+      });
+      if (x.responseCode !== 0)
+        throw Error(x.message || "El banco rechazó la anulación");
+      await db
+        .from("qr_codes")
+        .update({
+          status: "cancelled",
+          bank_response: x,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", q.id);
+      await db
+        .from("qr_audit_log")
+        .insert({
+          actor_id: user.id,
+          action: "cancel",
+          entity_type: "qr",
+          entity_id: b.qrId,
+          metadata: { environment: b.environment },
+        });
+      return json({ ok: true });
+    }
+    if (route === "reconcile" && r.method === "POST") {
+      const b = await r.json(),
+        i = await integ(b.environment || "test"),
+        c = await cfg(i),
+        { data: run } = await db
+          .from("qr_reconciliation_runs")
+          .insert({ integration_id: i.id, reconciliation_date: b.date })
+          .select()
+          .single();
+      try {
+        const x = await bank(
+          i,
+          `/api/qrsimple/v2/paidQR/${String(b.date).replaceAll("-", "")}`,
+          { headers: { Authorization: `Bearer ${await token(i, c)}` } },
+        );
+        let n = 0;
+        for (const p of x.paymentList || []) {
+          await pay(i, p, "reconciliation");
+          n++;
+        }
+        await db
+          .from("qr_reconciliation_runs")
+          .update({
+            status: "completed",
+            payments_found: n,
+            payments_inserted: n,
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", run.id);
+        return json({ ok: true, count: n });
+      } catch (e) {
+        await db
+          .from("qr_reconciliation_runs")
+          .update({
+            status: "failed",
+            error: String(e),
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", run.id);
+        throw e;
+      }
+    }
+    if (route === "report") {
+      const i = await integ(u.searchParams.get("environment") || "test");
+      let q = db
+        .from("qr_payments")
+        .select("*")
+        .eq("integration_id", i.id)
+        .order("payment_date", { ascending: false });
+      if (u.searchParams.get("from"))
+        q = q.gte("payment_date", u.searchParams.get("from"));
+      if (u.searchParams.get("to"))
+        q = q.lte("payment_date", u.searchParams.get("to"));
+      const { data, error } = await q.limit(5000);
+      if (error) throw error;
+      return json({ payments: data });
+    }
+    if (route === "dashboard") {
+      const i = await integ(u.searchParams.get("environment") || "test"),
+        [
+          { count: qrCount },
+          { count: paymentCount },
+          { count: pending },
+          { data: payments },
+          { data: recent },
+        ] = await Promise.all([
+          db
+            .from("qr_codes")
+            .select("*", { count: "exact", head: true })
+            .eq("integration_id", i.id),
+          db
+            .from("qr_payments")
+            .select("*", { count: "exact", head: true })
+            .eq("integration_id", i.id),
+          db
+            .from("qr_codes")
+            .select("*", { count: "exact", head: true })
+            .eq("integration_id", i.id)
+            .eq("status", "pending"),
+          db.from("qr_payments").select("amount").eq("integration_id", i.id),
+          db
+            .from("qr_codes")
+            .select("transaction_id,bank_qr_id,currency,amount,status")
+            .eq("integration_id", i.id)
+            .order("created_at", { ascending: false })
+            .limit(8),
+        ]);
+      return json({
+        metrics: {
+          qrCount,
+          paymentCount,
+          pending,
+          total: (payments || []).reduce(
+            (s: any, p: any) => s + Number(p.amount),
+            0,
+          ),
+          currency: "BOB",
+        },
+        recent,
+      });
+    }
+    if (route === "api-logs") {
+      const i = await integ(u.searchParams.get("environment") || "test", false),
+        limit = Math.min(Number(u.searchParams.get("limit") || 100), 500),
+        { data, error } = await db
+          .from("qr_api_logs")
+          .select(
+            "id,method,endpoint,request_payload,status_code,response_payload,success,error,duration_ms,created_at",
+          )
+          .eq("integration_id", i.id)
+          .order("created_at", { ascending: false })
+          .limit(limit);
+      if (error) throw error;
+      return json({ logs: data });
+    }
+    if (route === "settings" && r.method === "GET") {
+      const { data, error } = await db
+        .from("qr_integrations")
+        .select("id,environment,enabled,base_url")
+        .order("environment");
+      if (error) throw error;
+      const { data: c } = await db
+        .from("qr_integration_credentials")
+        .select("integration_id");
+      return json({
+        environments: (data || []).map((x) => ({
+          ...x,
+          hasCredentials:
+            (c || []).some((y) => y.integration_id === x.id) ||
+            !!Deno.env.get(
+              x.environment === "test"
+                ? "BANECO_TEST_CONFIG"
+                : "BANECO_PRODUCTION_CONFIG",
+            ),
+        })),
+      });
+    }
+    if (route === "settings" && r.method === "POST") {
+      const b = await r.json(),
+        i = await integ(b.environment, false);
+      let c: any = {};
+      try {
+        c = await cfg(i);
+      } catch {}
+      for (const f of ["userName", "password", "aesKey", "accountCredit"])
+        if (String(b[f] || "").trim()) c[f] = String(b[f]).trim();
+      if (!c.callbackSecret)
+        c.callbackSecret = crypto.randomUUID().replaceAll("-", "");
+      for (const f of ["userName", "password", "aesKey", "accountCredit"])
+        if (!c[f]) throw Error(`Falta completar ${f}`);
+      const url = String(b.baseUrl || "").trim();
+      if (!/^https:\/\//i.test(url))
+        throw Error("La URL debe comenzar con https://");
+      const { error: e } = await db
+        .from("qr_integration_credentials")
+        .upsert({
+          integration_id: i.id,
+          encrypted_payload: await seal(c),
+          updated_at: new Date().toISOString(),
+        });
+      if (e) throw e;
+      const { error: e2 } = await db
+        .from("qr_integrations")
+        .update({
+          base_url: url.replace(/\/$/, ""),
+          enabled: !!b.enabled,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", i.id);
+      if (e2) throw e2;
+      await db
+        .from("qr_audit_log")
+        .insert({
+          actor_id: user.id,
+          action: "settings_update",
+          entity_type: "integration",
+          entity_id: i.id,
+          metadata: { environment: b.environment, enabled: !!b.enabled },
+        });
+      return json({ ok: true });
+    }
+    return json({ error: "Ruta no encontrada" }, 404);
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e);
+    return json({ error: m }, m === "No autorizado" ? 401 : 400);
+  }
+});
