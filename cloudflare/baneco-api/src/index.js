@@ -89,19 +89,23 @@ export default {
 
     const createQr = url.pathname === '/v1/mentes-modernas/qrs';
     const statusMatch = url.pathname.match(/^\/v1\/mentes-modernas\/qrs\/(\d{4,8})\/status$/);
-    if (createQr || statusMatch) {
+    const paymentsReport = url.pathname === '/v1/mentes-modernas/payments';
+    if (createQr || statusMatch || paymentsReport) {
       if (!secureEqual(bearerOrHeader(request, 'x-client-token'), env.MENTES_MODERNAS_API_TOKEN)) {
         return json({ error: 'Cliente no autorizado' }, 401);
       }
       if (createQr && request.method !== 'POST') return json({ error: 'Método no permitido' }, 405);
       if (statusMatch && request.method !== 'GET') return json({ error: 'Método no permitido' }, 405);
+      if (paymentsReport && request.method !== 'GET') return json({ error: 'Método no permitido' }, 405);
       if (createQr && !request.headers.get('content-type')?.toLowerCase().includes('application/json')) {
         return json({ error: 'Se requiere application/json' }, 415);
       }
 
       const target = createQr
         ? `${SUPABASE_FUNCTION}/external-generate`
-        : `${SUPABASE_FUNCTION}/external-status?transactionId=${statusMatch[1]}&sessionId=${encodeURIComponent(url.searchParams.get('sessionId') || '')}`;
+        : statusMatch
+          ? `${SUPABASE_FUNCTION}/external-status?transactionId=${statusMatch[1]}&sessionId=${encodeURIComponent(url.searchParams.get('sessionId') || '')}`
+          : `${SUPABASE_FUNCTION}/external-report?date=${encodeURIComponent(url.searchParams.get('date') || '')}`;
       return forward(request, env, target, {
         'x-client-code': 'mentes-modernas',
         'x-qr-environment': 'production',

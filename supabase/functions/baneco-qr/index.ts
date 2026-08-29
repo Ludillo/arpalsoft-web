@@ -540,6 +540,32 @@ Deno.serve(async (r) => {
         updatedAt: q?.updated_at || external.updated_at,
       });
     }
+    if (route === "external-report" && r.method === "GET") {
+      const context = externalContext(r),
+        date = String(u.searchParams.get("date") || "");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw Error("Fecha inválida");
+      const i = await integ(context.environment),
+        c = await cfg(i),
+        x = await bank(
+          i,
+          `/api/qrsimple/v2/paidQR/${date.replaceAll("-", "")}`,
+          { headers: { Authorization: `Bearer ${await token(i, c)}` } },
+        ),
+        payments = x.paymentList || [];
+      for (const payment of payments) await pay(i, payment, "reconciliation");
+      return json({
+        date,
+        count: payments.length,
+        payments: payments.map((payment: any) => ({
+          transactionId: String(payment.transactionId || ""),
+          qrId: String(payment.qrId || ""),
+          paymentDate: payment.paymentDate,
+          paymentTime: payment.paymentTime,
+          currency: payment.currency,
+          amount: Number(payment.amount),
+        })),
+      });
+    }
     const user = await auth(r);
     if (route === "generate" && r.method === "POST") {
       const b = await r.json(),
