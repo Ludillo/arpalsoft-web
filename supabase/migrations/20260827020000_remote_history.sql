@@ -1,0 +1,1 @@
+-- Marcador local de una migración ya aplicada previamente en Supabase.
